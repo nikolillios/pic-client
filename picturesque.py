@@ -102,10 +102,7 @@ def schedule_intervaled_task(scheduler, interval, action, args=()):
                     (scheduler, interval, action, args))
     action(*args)
 
-def get_display_config(access_key):
-    serial_number = get_raspberry_pi_serial()
-    if serial_number == "0000000000000000":
-        raise Exception("No serial number found")
+def get_display_config(access_key, serial_number):
     res = requests.get(API_URL + "/images/getConfigForDevice/" + serial_number,
                        headers={
                             "Authorization": f"Bearer {access_key}",
@@ -128,46 +125,74 @@ def start_display(access_key, collection_id):
     scheduler.run()
 
 def get_collections(access_key, device_model):
-    try:
-        res = requests.get(API_URL + "/images/getCollections/" + str(device_model),
-                        headers={
-                                "Authorization": f"Bearer {access_key}",
-                                "Accept": "application/json"
-                            })
-        if res.status_code == 200:
-            return res.json()
-        else:
-            logging.info(res.reason)
-    except Exception as e:
-        logging.info(f'Error loading collections: {e}')
+    res = requests.get(API_URL + "/images/getCollections/" + str(device_model),
+                    headers={
+                            "Authorization": f"Bearer {access_key}",
+                            "Accept": "application/json"
+                        })
+    if res.status_code == 200:
+        return res.json()
+    else:
+        logging.info(res.reason)
 
-def prompt_device_config(access_key):
+def prompt_device_config(access_key, device_model, serial_number):
     print("Creating config for device")
     name = input("Device config name: ")
-    collections = get_collections(access_key)
-    print("Collections")
-    print(collections)
-    for i, collection in enumerate(collections):
-        print(f'{i}: {collection["name"]}')
-    collection_id = input("Select input here:")
+    valid_collection_selected = False
+    while not valid_collection_selected:
+        collections = get_collections(access_key, device_model)
+        print("Collections")
+        print(collections)
+        for i, collection in enumerate(collections):
+            print(f'{i}: {collection["name"]}')
+        n_cols = len(collections)
+        print(f'{n_cols}: Reload Collections')
+        collection_idx = int(input("Select input here:"))
+        if collection_idx == n_cols:
+            logging.info("Reloading collections...")
+            continue
+        elif collection_idx in range(n_cols):
+            valid_collection_selected = True
+    body = {
+        "device_name": name,
+        "serial":  serial_number,
+        "device_model": device_model,
+        "collection_id": str(collections[collection_idx]["id"])
+    }
+    res = requests.post(API_URL + "/images/createConfigForDevice/", body,
+                        headers={
+                            "Authorization": f"Bearer {access_key}",
+                            "Accept": "application/json"
+                        })
+    if res.status_code == 200:
+        logging.info("Successfully created new device config!")
+        return res.json()
+    else:
+        logging.info(f'Error while creating config: {res.reason}')
+
 
 def main(epd):
     json_keys = prompt_login()
     access_key = json_keys["access"]
     refresh_token = json_keys["refresh"]
-    config = get_display_config(access_key)
+    serial_number = get_raspberry_pi_serial()
+    if serial_number == "0000000000000000":
+        raise Exception("No serial number found")
+    config = get_display_config(access_key, serial_number)
     #TODO: validate config
-    if config:
-        logging.info("init and Clear")
-        epd.init()
-        epd.Clear()
-        start_display(access_key, int(config["collection"]))
-    elif config == {}:
-        prompt_device_config(access_key, DEVICE_MODEL)
-    else:
-        #TODO: ask to configure device here
-        logging.info("No config found")
-        raise Exception("Server error fetching config.")
+    while not config:
+        if config == {}:
+            logging.info("No config found")
+            try:
+                config = prompt_device_config(access_key, DEVICE_MODEL, serial_number)
+            except Exception as e:
+                logging.error(e)
+        else:
+            raise Exception("Server error fetching config.")
+    logging.info("init and Clear")
+    epd.init()
+    epd.Clear()
+    start_display(access_key, int(config["collection"]))
 
 
 epd = epd7in3e.EPD()
