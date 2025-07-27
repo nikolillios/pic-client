@@ -63,6 +63,12 @@ def get_auth_headers(access_key):
     }
 
 def load_images(access_key, collection_id):
+    config = get_display_config(access_key, get_raspberry_pi_serial())
+    logging.info("Got config")
+    logging.info(config)
+    if not config:
+        logging.error("No config found when loading images")
+        return
     try:
         res = requests.get(API_URL + "/images/getDitheredImagesByCollection/" + str(collection_id),
                         headers={
