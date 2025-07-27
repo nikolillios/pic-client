@@ -91,8 +91,11 @@ class Counter():
     def value(self):
         return self._val
 
-def rotate_image(counter):
-    images = os.listdir(picdir)
+def rotate_image(counter, collection_id, collections):
+    active_collection = collections[collection_id]
+    if not active_collection:
+        logging.error(f'No collection with id {collection_id} in collections')
+    images = [f'{image_id}.bmp' for image_id in collections[collection_id].images]
     counter.add()
     Himage = Image.open(os.path.join(picdir, images[counter.value()%len(images)]))
     epd.display(epd.getbuffer(Himage))
@@ -117,11 +120,11 @@ def get_display_config(access_key, serial_number):
         logging.info(res.reason)
         return None
 
-def start_display(access_key, collection_id):
+def start_display(access_key, collection_id, collections):
     scheduler = sched.scheduler()
     counter = Counter()
     schedule_intervaled_task(scheduler, 60*60, load_images, (access_key, collection_id))
-    schedule_intervaled_task(scheduler, 60*20, rotate_image, (counter,))
+    schedule_intervaled_task(scheduler, 60*20, rotate_image, (counter, collection_id, collections))
     scheduler.run()
 
 def get_collections(access_key, device_model):
@@ -135,14 +138,13 @@ def get_collections(access_key, device_model):
     else:
         logging.info(res.reason)
 
-def prompt_device_config(access_key, device_model, serial_number):
+def prompt_device_config(access_key, device_model, serial_number, collections):
     print("Creating config for device")
     name = input("Device config name: ")
     valid_collection_selected = False
     while not valid_collection_selected:
-        collections = get_collections(access_key, device_model)
-        print("Collections")
-        print(collections)
+        if not collections:
+            continue
         for i, collection in enumerate(collections):
             print(f'{i}: {collection["name"]}')
         n_cols = len(collections)
@@ -184,7 +186,12 @@ def main(epd):
         if config == {}:
             logging.info("No config found")
             try:
-                config = prompt_device_config(access_key, DEVICE_MODEL, serial_number)
+                collections = get_collections(access_key, device_model)
+                print("Collections")
+                print(collections)
+                if not collections:
+                    continue
+                config = prompt_device_config(access_key, DEVICE_MODEL, serial_number, collections)
             except Exception as e:
                 logging.error(e)
         else:
@@ -192,7 +199,7 @@ def main(epd):
     logging.info("init and Clear")
     epd.init()
     epd.Clear()
-    start_display(access_key, int(config["collection"]))
+    start_display(access_key, int(config["collection"]), collections)
 
 
 epd = epd7in3e.EPD()
