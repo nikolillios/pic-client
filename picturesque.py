@@ -112,6 +112,9 @@ class Counter():
 def rotate_image(counter):
     images = os.listdir(picdir)
     counter.add()
+    if not images:
+        logging.info("No images to display")
+        return
     Himage = Image.open(os.path.join(picdir, images[counter.value()%len(images)]))
     epd.display(epd.getbuffer(Himage))
 
