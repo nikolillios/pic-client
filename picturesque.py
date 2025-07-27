@@ -62,7 +62,13 @@ def get_auth_headers(access_key):
         "Accept": "application/json"
     }
 
-def load_images(access_key, collection_id):
+def prune_stale_images(stale_images):
+    for filename in stale_images:
+        file_path = os.path.join(picdir, filename)
+        if os.path.isfile(file_path) or os.path.islink(file_path):
+            os.remove(file_path)
+
+def load_images(access_key):
     config = get_display_config(access_key, get_raspberry_pi_serial())
     logging.info("Got config")
     logging.info(config)
@@ -70,14 +76,19 @@ def load_images(access_key, collection_id):
         logging.error("No config found when loading images")
         return
     try:
-        res = requests.get(API_URL + "/images/getDitheredImagesByCollection/" + str(collection_id),
+        res = requests.get(API_URL + "/images/getDitheredImagesByCollection/" + str(config["collection"]),
                         headers={
                                 "Authorization": f"Bearer {access_key}",
                                 "Accept": "application/json"
                             })
         if res.status_code == 200:
             data_json = res.json()
+            image_ids = [image for image in data_json]
+            prunable_images = [file for file in os.listdir(picdir) if file.split(".")[0] not in image_ids]
+            prune_stale_images(prunable_images)
             for image_id in data_json:
+                if image_id in image_ids:
+                    continue
                 image_bytes = data_json[image_id]["data"]
                 image_stream = io.BytesIO(base64.b64decode(image_bytes.encode("utf-8")))
                 im = Image.open(image_stream)
@@ -97,11 +108,8 @@ class Counter():
     def value(self):
         return self._val
 
-def rotate_image(counter, collection_id, collections):
-    active_collection = collections[collection_id]
-    if not active_collection:
-        logging.error(f'No collection with id {collection_id} in collections')
-    images = [f'{image_id}.bmp' for image_id in collections[collection_id].images]
+def rotate_image(counter):
+    images = os.listdir(picdir)
     counter.add()
     Himage = Image.open(os.path.join(picdir, images[counter.value()%len(images)]))
     epd.display(epd.getbuffer(Himage))
@@ -126,11 +134,11 @@ def get_display_config(access_key, serial_number):
         logging.info(res.reason)
         return None
 
-def start_display(access_key, collection_id, collections):
+def start_display(access_key):
     scheduler = sched.scheduler()
     counter = Counter()
-    schedule_intervaled_task(scheduler, 60*60, load_images, (access_key, collection_id))
-    schedule_intervaled_task(scheduler, 60*20, rotate_image, (counter, collection_id, collections))
+    schedule_intervaled_task(scheduler, 60*1, load_images, (access_key,))
+    schedule_intervaled_task(scheduler, 60*1, rotate_image, (counter,))
     scheduler.run()
 
 def get_collections(access_key, device_model):
@@ -188,15 +196,13 @@ def main(epd):
         raise Exception("No serial number found")
     config = get_display_config(access_key, serial_number)
     #TODO: validate config
+    collections = None
+    while not collections:
+        collections = get_collections(access_key, DEVICE_MODEL)
     while not config:
         if config == {}:
             logging.info("No config found")
             try:
-                collections = get_collections(access_key, device_model)
-                print("Collections")
-                print(collections)
-                if not collections:
-                    continue
                 config = prompt_device_config(access_key, DEVICE_MODEL, serial_number, collections)
             except Exception as e:
                 logging.error(e)
@@ -205,7 +211,7 @@ def main(epd):
     logging.info("init and Clear")
     epd.init()
     epd.Clear()
-    start_display(access_key, int(config["collection"]), collections)
+    start_display(access_key)
 
 
 epd = epd7in3e.EPD()
