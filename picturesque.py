@@ -87,7 +87,7 @@ def load_images(access_key):
             prunable_images = [file for file in os.listdir(picdir) if file.split(".")[0] not in image_ids]
             prune_stale_images(prunable_images)
             for image_id in data_json:
-                if image_id in image_ids:
+                if image_id in os.listdir(picdir):
                     continue
                 image_bytes = data_json[image_id]["data"]
                 image_stream = io.BytesIO(base64.b64decode(image_bytes.encode("utf-8")))
