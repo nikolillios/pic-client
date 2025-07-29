@@ -9,6 +9,7 @@ if os.path.exists(libdir):
     sys.path.append(libdir)
 os.makedirs(picdir, exist_ok=True)
 
+import asyncio
 import base64
 import logging
 import sched
@@ -31,15 +32,16 @@ def prompt_login():
         # password = input ("Enter password:\n")
         username = "nikolillios"
         password = "niko1234"
-        res = requests.post(API_URL + "/token/", {
-            "username": username,
-            "password": password
-        })
         try:
+            res = requests.post(API_URL + "/token/", {
+                "username": username,
+                "password": password
+            })
             data = res.json()
             return data
         except Exception as e:
             logging.info(e)
+            res.raise_for_status()
 
 def save_tokens(token_data, filename = 'tokens.json') -> None:
     """Save tokens to file"""
@@ -71,12 +73,25 @@ def refresh_access_token():
         save_tokens(res.json())
     else:
         logging.error(res.reason)
+        res.raise_for_status()
         return None
 
-def refresh_with_retry():
+async def refresh_with_retry(max_retries=10, base_delay=1, exponential_base=2, max_delay=60*60):
     refreshed_tokens = False
-    while not refreshed_tokens:
-        refreshed = refresh_access_token()
+    retries = 0
+    delay = base_delay
+    while not refreshed_tokens and retries < max_retries:
+        logging.info(f'refreshing tokens with delay {delay}')
+        try:
+            refreshed = refresh_access_token()
+            return True
+        except requests.exceptions.HTTPError as e:
+            logging.error(f'HTTPError: {e}')
+        retries += 1
+        if not refreshed:
+            asyncio.sleep(min(delay, max_delay))
+            delay *= exponential_base
+    return False
 
 def get_raspberry_pi_serial():
     """
@@ -134,7 +149,7 @@ def load_images():
                 im = Image.open(image_stream)
                 im.save(f'{picdir}/{image_id}.bmp', format="BMP")
         elif res.status_code == 401:
-            refresh_with_retry()
+            refresh_access_token()
             load_images()
         else:
             logging.info(res.reason)
@@ -166,19 +181,24 @@ def schedule_intervaled_task(scheduler, interval, action, args=()):
     action(*args)
 
 def get_display_config(access_key, serial_number):
-    res = requests.get(API_URL + "/images/getConfigForDevice/" + serial_number,
-                       headers={
-                            "Authorization": f"Bearer {access_key}",
-                            "Accept": "application/json"
-                        })
-    if res.status_code == 200:
-        return res.json()
-    elif res.status_code == 204:
-        logging.info(f'No Config found for serial: {serial_number}')
-        return {}
-    else:
-        logging.info(res.reason)
-        return None
+    try:
+        res = requests.get(API_URL + "/images/getConfigForDevice/" + serial_number,
+                        headers={
+                                "Authorization": f"Bearer {access_key}",
+                                "Accept": "application/json"
+                            }, timeout=30)
+        if res.status_code == 200:
+            return res.json()
+        elif res.status_code == 204:
+            logging.info(f'No Config found for serial: {serial_number}')
+            return {}
+        else:
+            logging.info(res.reason)
+            return None
+    except requests.exceptions.Timeout:
+        logging.error("Request for collections timed out.")
+    except requests.exceptions.ConnectionError:
+        logging.error("Connection error.")
 
 def start_display():
     scheduler = sched.scheduler()
@@ -187,18 +207,21 @@ def start_display():
     schedule_intervaled_task(scheduler, 60*1, rotate_image, (counter,))
     scheduler.run()
 
-def get_collections(access_key):
-    res = requests.get(API_URL + "/images/getCollections/" + str(DEVICE_MODEL),
-                    headers={
-                            "Authorization": f"Bearer {access_key}",
-                            "Accept": "application/json"
-                        })
-    if res.status_code == 200:
-        return res.json()
-    elif res.status_code == 401:
-        refresh_access_token()
-    else:
-        logging.info(res.reason)
+def get_collections(access_key, timeout=30):
+    try:
+        res = requests.get(API_URL + "/images/getCollections/" + str(DEVICE_MODEL),
+                        headers={
+                                "Authorization": f"Bearer {access_key}",
+                                "Accept": "application/json"
+                            }, timeout=timeout)
+        if res.status_code == 200:
+            return res.json()
+        else:
+            logging.info(res.reason)
+    except requests.exceptions.Timeout:
+        logging.error("Request for collections timed out.")
+    except requests.exceptions.ConnectionError:
+        logging.error("Connection error.")
 
 def prompt_device_config(serial_number, collections):
     access_key = load_tokens()["access"]
@@ -236,8 +259,9 @@ def prompt_device_config(serial_number, collections):
         logging.info(f'Error while creating config: {res.reason}')
 
 
-def main(epd):
-    if load_tokens() and refresh_access_token():
+async def main(epd):
+    if load_tokens():
+        await refresh_with_retry()
         logging.info("Refresh token valid")
     else:
         keys = prompt_login()
@@ -248,11 +272,17 @@ def main(epd):
     serial_number = get_raspberry_pi_serial()
     if serial_number == "0000000000000000":
         raise Exception("No serial number found")
-    config = get_display_config(access_key, serial_number)
+    config = None
+    while not config:
+        config = get_display_config(access_key, serial_number)
+        if not config:
+            time.sleep(20)
     #TODO: validate config
     collections = None
     while not collections:
         collections = get_collections(access_key)
+        if not collections:
+            time.sleep(20)
     while not config:
         if config == {}:
             logging.info("No config found")
@@ -271,7 +301,7 @@ def main(epd):
 epd = epd7in3e.EPD()
 while True:
     try:
-        main(epd)
+        asyncio.run(main(epd))
     except IOError as e:
         logging.info(e)
     except KeyboardInterrupt:
