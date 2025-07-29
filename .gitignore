@@ -1,3 +1,4 @@
 pic/*
 *__pycache__/
 *.pyc
+tokens.json
