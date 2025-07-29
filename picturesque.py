@@ -13,6 +13,7 @@ import base64
 import logging
 import sched
 import requests
+import json
 from waveshare_epd import epd7in3e
 import time
 from PIL import Image,ImageDraw,ImageFont
@@ -39,6 +40,43 @@ def prompt_login():
             return data
         except Exception as e:
             logging.info(e)
+
+def save_tokens(token_data, filename = 'tokens.json') -> None:
+    """Save tokens to file"""
+    try:
+        with open(filename, 'w') as f:
+            json.dump(token_data, f, indent=2)
+        print(f"Tokens saved to {filename}")
+    except IOError as e:
+        print(f"Error saving tokens: {e}")
+
+def load_tokens(filename = 'tokens.json'):
+    """Load tokens from file"""
+    try:
+        with open(filename, 'r') as f:
+            return json.load(f)
+    except (IOError, json.JSONDecodeError) as e:
+        print(f"Error loading tokens: {e}")
+        return None
+
+def refresh_access_token():
+    json_tokens = load_tokens()
+    if not json_tokens:
+        raise Exception("No tokens to refresh with")
+    res = requests.post(API_URL + "/token/refresh/", {
+        "refresh": json_tokens["refresh"]
+    })
+    if res.status_code == 200:
+        logging.info("Refreshed access tokens")
+        save_tokens(res.json())
+    else:
+        logging.error(res.reason)
+        return None
+
+def refresh_with_retry():
+    refreshed_tokens = False
+    while not refreshed_tokens:
+        refreshed = refresh_access_token()
 
 def get_raspberry_pi_serial():
     """
@@ -69,7 +107,8 @@ def prune_stale_images(stale_images):
         if os.path.isfile(file_path) or os.path.islink(file_path):
             os.remove(file_path)
 
-def load_images(access_key):
+def load_images():
+    access_key = load_tokens()["access"]
     config = get_display_config(access_key, get_raspberry_pi_serial())
     logging.info("Got config")
     logging.info(config)
@@ -94,6 +133,9 @@ def load_images(access_key):
                 image_stream = io.BytesIO(base64.b64decode(image_bytes.encode("utf-8")))
                 im = Image.open(image_stream)
                 im.save(f'{picdir}/{image_id}.bmp', format="BMP")
+        elif res.status_code == 401:
+            refresh_with_retry()
+            load_images()
         else:
             logging.info(res.reason)
     except Exception as e:
@@ -138,25 +180,28 @@ def get_display_config(access_key, serial_number):
         logging.info(res.reason)
         return None
 
-def start_display(access_key):
+def start_display():
     scheduler = sched.scheduler()
     counter = Counter()
-    schedule_intervaled_task(scheduler, 60*1, load_images, (access_key,))
+    schedule_intervaled_task(scheduler, 60*1, load_images)
     schedule_intervaled_task(scheduler, 60*1, rotate_image, (counter,))
     scheduler.run()
 
-def get_collections(access_key, device_model):
-    res = requests.get(API_URL + "/images/getCollections/" + str(device_model),
+def get_collections(access_key):
+    res = requests.get(API_URL + "/images/getCollections/" + str(DEVICE_MODEL),
                     headers={
                             "Authorization": f"Bearer {access_key}",
                             "Accept": "application/json"
                         })
     if res.status_code == 200:
         return res.json()
+    elif res.status_code == 401:
+        refresh_access_token()
     else:
         logging.info(res.reason)
 
-def prompt_device_config(access_key, device_model, serial_number, collections):
+def prompt_device_config(serial_number, collections):
+    access_key = load_tokens()["access"]
     print("Creating config for device")
     name = input("Device config name: ")
     valid_collection_selected = False
@@ -176,7 +221,7 @@ def prompt_device_config(access_key, device_model, serial_number, collections):
     body = {
         "device_name": name,
         "serial":  serial_number,
-        "device_model": device_model,
+        "device_model": DEVICE_MODEL,
         "collection_id": str(collections[collection_idx]["id"])
     }
     res = requests.post(API_URL + "/images/createConfigForDevice/", body,
@@ -192,7 +237,12 @@ def prompt_device_config(access_key, device_model, serial_number, collections):
 
 
 def main(epd):
-    json_keys = prompt_login()
+    if load_tokens() and refresh_access_token():
+        logging.info("Refresh token valid")
+    else:
+        keys = prompt_login()
+        save_tokens(keys)
+    json_keys = load_tokens()
     access_key = json_keys["access"]
     refresh_token = json_keys["refresh"]
     serial_number = get_raspberry_pi_serial()
@@ -202,12 +252,12 @@ def main(epd):
     #TODO: validate config
     collections = None
     while not collections:
-        collections = get_collections(access_key, DEVICE_MODEL)
+        collections = get_collections(access_key)
     while not config:
         if config == {}:
             logging.info("No config found")
             try:
-                config = prompt_device_config(access_key, DEVICE_MODEL, serial_number, collections)
+                config = prompt_device_config(serial_number, collections)
             except Exception as e:
                 logging.error(e)
         else:
@@ -215,18 +265,19 @@ def main(epd):
     logging.info("init and Clear")
     epd.init()
     epd.Clear()
-    start_display(access_key)
+    start_display()
 
 
 epd = epd7in3e.EPD()
 while True:
-    try:  
+    try:
         main(epd)
     except IOError as e:
         logging.info(e)
-    except KeyboardInterrupt:    
+    except KeyboardInterrupt:
         logging.info("ctrl + c:")
         epd7in3e.epdconfig.module_exit(cleanup=True)
         exit()
     except Exception as e:
         logging.error(f'Unexpected error encountered: {e}')
+        traceback.print_exc()
