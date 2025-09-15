@@ -22,16 +22,16 @@ import traceback
 
 logging.basicConfig(level=logging.DEBUG)
 
-API_URL = "http://192.168.12.214:8000"
+API_URL = "http://192.168.12.89:8000"
 DEVICE_MODEL = 1 #TODO: input from startup script
 
 def prompt_login():
     # Return access key and refresk token
     while True:
-        # username = input("Enter username:\n")
-        # password = input ("Enter password:\n")
-        username = "nikolillios"
-        password = "niko1234"
+        username = input("Enter username:\n")
+        password = input ("Enter password:\n")
+        # username = "nikolillios"
+        # password = "niko1234"
         try:
             res = requests.post(API_URL + "/token/", {
                 "username": username,
@@ -65,16 +65,20 @@ def refresh_access_token():
     json_tokens = load_tokens()
     if not json_tokens:
         raise Exception("No tokens to refresh with")
-    res = requests.post(API_URL + "/token/refresh/", {
-        "refresh": json_tokens["refresh"]
-    })
-    if res.status_code == 200:
-        logging.info("Refreshed access tokens")
-        save_tokens(res.json())
-    else:
-        logging.error(res.reason)
-        res.raise_for_status()
-        return None
+    try:
+        res = requests.post(API_URL + "/token/refresh/", {
+            "refresh": json_tokens["refresh"]
+        })
+        if res.status_code == 200:
+            logging.info("Refreshed access tokens")
+            save_tokens(res.json())
+            return res.json()
+        else:
+            logging.error(res.reason)
+            # res.raise_for_status()
+            return False
+    except Exception as e:
+        logging.error(e)
 
 async def refresh_with_retry(max_retries=10, base_delay=1, exponential_base=2, max_delay=60*60):
     refreshed_tokens = False
@@ -82,15 +86,12 @@ async def refresh_with_retry(max_retries=10, base_delay=1, exponential_base=2, m
     delay = base_delay
     while not refreshed_tokens and retries < max_retries:
         logging.info(f'refreshing tokens with delay {delay}')
-        try:
-            refreshed = refresh_access_token()
+        if refresh_access_token():
+            refreshed_tokens = True
             return True
-        except requests.exceptions.HTTPError as e:
-            logging.error(f'HTTPError: {e}')
         retries += 1
-        if not refreshed:
-            asyncio.sleep(min(delay, max_delay))
-            delay *= exponential_base
+        await asyncio.sleep(min(delay, max_delay))
+        delay *= exponential_base
     return False
 
 def get_raspberry_pi_serial():
@@ -192,6 +193,8 @@ def get_display_config(access_key, serial_number):
         elif res.status_code == 204:
             logging.info(f'No Config found for serial: {serial_number}')
             return {}
+        elif res.status_code == 401:
+            refresh_access_token()
         else:
             logging.info(res.reason)
             return None
@@ -203,8 +206,8 @@ def get_display_config(access_key, serial_number):
 def start_display():
     scheduler = sched.scheduler()
     counter = Counter()
-    schedule_intervaled_task(scheduler, 60*1, load_images)
-    schedule_intervaled_task(scheduler, 60*1, rotate_image, (counter,))
+    schedule_intervaled_task(scheduler, 60*10, load_images)
+    schedule_intervaled_task(scheduler, 60*10, rotate_image, (counter,))
     scheduler.run()
 
 def get_collections(access_key, timeout=30):
